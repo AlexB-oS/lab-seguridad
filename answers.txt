@@ -1,1 +1,138 @@
-## Place your answers here.
+====================================================================
+EJERCICIO 1 – Identificación del buffer overflow
+====================================================================
+
+BUFFER VULNERABLE:
+  reqpath[4096] declarado en process_client() → zookd.c
+
+FLUJO DE LLAMADAS (desde process_client):
+  process_client()
+    → http_request_line(fd, reqpath, env, &env_len)   [http.c]
+        → url_decode(reqpath, sp1)                    [http.c]
+
+DESCRIPCIÓN DE LA VULNERABILIDAD:
+  En http.c, la función http_request_line() llama a url_decode(reqpath, sp1)
+  sin verificar la longitud de sp1 respecto al tamaño de reqpath.
+
+  - reqpath: buffer de 4096 bytes en el stack de process_client().
+  - sp1: puntero al path de la URL dentro de buf[8192] (variable estática).
+    El path puede tener hasta aproximadamente 8177 bytes.
+  - url_decode() copia byte a byte sp1 → reqpath sin límite de tamaño.
+
+  Si el atacante envía un HTTP request con un URL path de más de 4096 bytes,
+  url_decode sobrescribe memoria más allá de reqpath, incluyendo:
+    - errmsg  (8 bytes, puntero const char*)
+    - saved rbp del frame de process_client (8 bytes)
+    - saved rip / dirección de retorno de process_client (8 bytes) ← clave
+
+CÓMO ESTRUCTURAR EL REQUEST:
+  GET /[AAAA...4096 bytes...][errmsg:8bytes][rbp:8bytes][new_rip:8bytes] HTTP/1.0\r\n\r\n
+
+  El URL path va entre "GET /" y " HTTP/1.0". El path es procesado por
+  url_decode y copiado a reqpath sin bounds check.
+
+  Bytes que contengan caracteres especiales (espacios, nulos, %) deben
+  ir como %XX para sobrevivir el parsing HTTP y que url_decode los decodifique.
+
+DIAGRAMA DEL STACK (en process_client, before overflow):
+  ┌──────────────────────────┐  ← dirección alta
+  │  saved rip (8 bytes)     │  ← return address
+  │  saved rbp (8 bytes)     │
+  │  errmsg   (8 bytes)      │
+  │  reqpath[4095]           │
+  │  ...                     │
+  │  reqpath[0]              │  ← dirección baja
+  └──────────────────────────┘
+
+  Para sobrescribir saved_rip necesitamos escribir:
+    4096 (reqpath) + 8 (errmsg) + 8 (saved rbp) = 4112 bytes de relleno
+  seguido de los 8 bytes de la nueva dirección de retorno.
+
+
+====================================================================
+EJERCICIO 6 – Vulnerabilidades adicionales
+====================================================================
+
+VULNERABILIDAD 2: overflow en value[] en http_request_headers()
+----------------------------------------------------------------
+  Código relevante (http.c, función http_request_headers):
+    char value[512];
+    ...
+    url_decode(value, sp);
+
+  - value: buffer de solo 512 bytes en el stack de http_request_headers().
+  - sp: puntero a parte de buf[8192] (el valor de un header HTTP).
+    Un header puede tener hasta ~8000 bytes.
+  - url_decode() copia sin límite → desbordamiento del stack de http_request_headers.
+
+  CÓMO EXPLOTARLO:
+    El atacante envía un header HTTP con un valor muy largo (>512 bytes):
+      GET / HTTP/1.0\r\n
+      Cookie: AAAA...8000 bytes...\r\n
+      \r\n
+
+  LIMITACIÓN:
+    Requiere controlar el layout del stack de http_request_headers, que es
+    más complejo que process_client.
+
+  QUÉ PUEDE LOGRAR UN ATACANTE:
+    Sobrescribir la dirección de retorno de http_request_headers y ejecutar
+    código arbitrario (con exstack) o redirect ROP (con nxstack).
+
+  CÓMO PREVENIRLO:
+    Reemplazar url_decode(value, sp) por una versión con límite de tamaño:
+      url_decode_n(value, sp, sizeof(value));
+
+
+VULNERABILIDAD 3: overflow en envvar[] mediante header name largo
+-----------------------------------------------------------------
+  Código relevante (http.c, http_request_headers):
+    char envvar[512];
+    ...
+    sprintf(envvar, "HTTP_%s", buf);
+
+  - envvar: 512 bytes en el stack de http_request_headers.
+  - buf: el nombre del header (desde buf[8192] estático), puede ser ~4000 bytes.
+  - sprintf sin límite → overflow de envvar.
+
+  CÓMO EXPLOTARLO:
+    El atacante envía un header HTTP con un nombre extremadamente largo:
+      GET / HTTP/1.0\r\n
+      [AAAA...600 bytes...]: valor\r\n
+      \r\n
+
+    sprintf(envvar, "HTTP_%s", buf) intentará escribir "HTTP_" + 600 bytes
+    en envvar[512] → overflow.
+
+  LIMITACIÓN:
+    buf[i] se convierte a uppercase con toupper(), así que solo chars
+    ASCII son útiles. El nombre del header también tiene restricciones de
+    formato HTTP (no puede tener espacios ni ':' internos sin encoding).
+
+  QUÉ PUEDE LOGRAR UN ATACANTE:
+    Igual que la vulnerabilidad anterior: control del flujo de ejecución.
+
+  CÓMO PREVENIRLO:
+    snprintf(envvar, sizeof(envvar), "HTTP_%s", buf);
+
+
+====================================================================
+EJERCICIO 7 – Descripción de los fixes
+====================================================================
+
+Para prevenir las vulnerabilidades explotadas en ejercicios 2, 4 y 5
+(todas derivadas del mismo overflow en http_request_line), se modifica http.c:
+
+FIX 1 – Agregar url_decode_n() con límite de tamaño (http.c):
+  Se agrega una versión de url_decode que acepta el tamaño máximo de destino
+  y nunca escribe más de n-1 bytes.
+
+FIX 2 – http_request_line(): verificar longitud antes de url_decode():
+  Se llama a url_decode_n(reqpath, sp1, 4096) en lugar de url_decode(reqpath, sp1).
+  Ahora el path decodificado no puede superar 4095 bytes.
+
+FIX 3 – http_request_headers(): fix para value[] y envvar[]:
+  url_decode_n(value, sp, sizeof(value));
+  snprintf(envvar, sizeof(envvar), "HTTP_%s", buf);
+
+Ver las modificaciones en http.c para el código exacto.

