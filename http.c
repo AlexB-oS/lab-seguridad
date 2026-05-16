@@ -102,7 +102,7 @@ const char *http_request_line(int fd, char *reqpath, char *env, size_t *env_len)
     }
 
     /* decode URL escape sequences in the requested path into reqpath */
-    url_decode(reqpath, sp1);
+    url_decode_n(reqpath, sp1, 4096);
 
     envp += sprintf(envp, "REQUEST_URI=%s", reqpath) + 1;
 
@@ -156,13 +156,17 @@ const char *http_request_headers(int fd)
         }
 
         /* Decode URL escape sequences in the value */
-        url_decode(value, sp);
+        url_decode_n(value, sp, sizeof(value));
 
         /* Store header in env. variable for application code */
         /* Some special headers don't use the HTTP_ prefix. */
         if (strcmp(buf, "CONTENT_TYPE") != 0 &&
             strcmp(buf, "CONTENT_LENGTH") != 0) {
-            sprintf(envvar, "HTTP_%s", buf);
+            size_t buflen = strlen(buf);
+            if (buflen + 6 > sizeof(envvar))
+                return "Header name too long";
+            memcpy(envvar, "HTTP_", 5);
+            memcpy(envvar + 5, buf, buflen + 1);
             setenv(envvar, value, 1);
         } else {
             setenv(buf, value, 1);
@@ -468,6 +472,45 @@ void url_decode(char *dst, const char *src)
 
         dst++;
     }
+}
+
+void url_decode_n(char *dst, const char *src, size_t dstsz)
+{
+    if (dstsz == 0)
+        return;
+
+    size_t remaining = dstsz;
+    while (remaining > 1)
+    {
+        if (src[0] == '%' && src[1] && src[2])
+        {
+            char hexbuf[3];
+            hexbuf[0] = src[1];
+            hexbuf[1] = src[2];
+            hexbuf[2] = '\0';
+
+            *dst = strtol(&hexbuf[0], 0, 16);
+            src += 3;
+        }
+        else if (src[0] == '+')
+        {
+            *dst = ' ';
+            src++;
+        }
+        else
+        {
+            *dst = *src;
+            src++;
+
+            if (*dst == '\0')
+                return;
+        }
+
+        dst++;
+        remaining--;
+    }
+
+    *dst = '\0';
 }
 
 void env_deserialize(const char *env, size_t len)

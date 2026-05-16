@@ -33,6 +33,7 @@ void http_set_executable_uid_gid(int uid, int gid);
 
 /** URL decoder. */
 void url_decode(char *dst, const char *src);
+void url_decode_n(char *dst, const char *src, size_t dstsz);
 
 /** Unpack and set environmental strings. */
 void env_deserialize(const char *env, size_t len);
